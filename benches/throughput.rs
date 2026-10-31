@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use divan::{Bencher, black_box, counter::BytesCount};
 use zfs_dedup::cache::Cache;
 use zfs_dedup::dedup::{build_index, dedup};
-use zfs_dedup::hasher::{Hashed, Stat, hash_chunk, hash_file, hash_files};
+use zfs_dedup::hasher::{ChunkHash, Hashed, Stat, hash_file, hash_files};
 use zfs_dedup::walk::Paths;
 
 fn main() {
@@ -15,7 +15,7 @@ fn main() {
 fn chunk(b: Bencher, size: usize) {
     let buf = vec![0xa5u8; size];
     b.counter(BytesCount::new(size))
-        .bench(|| hash_chunk(black_box(&buf)));
+        .bench(|| ChunkHash::hash_chunk(black_box(&buf)));
 }
 
 #[divan::bench(args = [1, 16, 256])]
@@ -108,7 +108,7 @@ fn index(b: Bencher, n_chunks: u32) {
     // Realistic 128-bit keys: production hashes are uniform across all
     // bytes, and ChunkKeyHasher relies on that.
     let hashes: Vec<_> = (0..n_chunks)
-        .map(|i| hash_chunk(&i.to_le_bytes()))
+        .map(|i| ChunkHash::hash_chunk(&i.to_le_bytes()))
         .collect();
     let dir = tempfile::tempdir().unwrap();
     let cache = Cache::open(&dir.path().join("c.redb")).unwrap();

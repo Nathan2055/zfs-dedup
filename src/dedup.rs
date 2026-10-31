@@ -8,9 +8,9 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 
 use crate::bloom::Bloom;
-use crate::cache::{Cache, ChunkHash};
+use crate::cache::Cache;
 use crate::clone::{Dedupe, clone_range, dedupe_range};
-use crate::hasher::{Hashed, NOFOLLOW_NONBLOCK, ZERO_HASH};
+use crate::hasher::{ChunkHash, Hashed, NOFOLLOW_NONBLOCK};
 use crate::walk::{FilePath, Paths};
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -160,7 +160,7 @@ fn coalesce(mut locs: Vec<(Loc, Loc)>, blksz: u64) -> Vec<Run> {
 // are safe -- pass 2 re-keys by the full hash, so a colliding singleton
 // becomes a one-Loc group and the trailing retain drops it.
 fn dup_key(blksz: u32, h: &ChunkHash) -> u64 {
-    u64::from_le_bytes(h[8..16].try_into().expect("16-byte hash"))
+    u64::from_le_bytes(h.as_ref()[8..16].try_into().expect("16-byte hash"))
         ^ u64::from(blksz).wrapping_mul(0x9e3779b97f4a7c15)
 }
 
@@ -229,7 +229,7 @@ fn each_chunk(
             continue;
         };
         for (ci, hash) in entry.hashes.iter().enumerate() {
-            if *hash != ZERO_HASH {
+            if *hash != ChunkHash::ZERO_HASH {
                 f(fi, ci, h, hash);
             }
         }
@@ -457,7 +457,7 @@ fn chunk_len(h: &Hashed, chunk: u64, blksz: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hasher::{Stat, hash_chunk, hash_file};
+    use crate::hasher::{Stat, hash_file};
 
     const DRY: Opts = Opts {
         dry_run: true,
@@ -609,9 +609,11 @@ mod tests {
     #[test]
     fn dup_key_collision() {
         let tx = Tx::new();
-        let ha = [0xaa; 16];
-        let mut hb = [0xbb; 16];
+        let ha = [0xaa as u8; 16];
+        let mut hb = [0xbb as u8; 16];
         hb[8..].copy_from_slice(&[0xaa; 8]);
+        let ha = ChunkHash::from_array(ha);
+        let hb = ChunkHash::from_array(hb);
         assert_eq!(dup_key(4096, &ha), dup_key(4096, &hb));
         let files = [
             tx.synth("a", 4096, 4096, &[ha]),
@@ -626,8 +628,8 @@ mod tests {
         let data = [9u8; 4096];
         // Same bytes, same hash, different blksz: must not be a candidate.
         let files = [
-            tx.synth("a", 4096, 4096, &[hash_chunk(&data)]),
-            tx.synth("b", 4096, 8192, &[hash_chunk(&data)]),
+            tx.synth("a", 4096, 4096, &[ChunkHash::hash_chunk(&data)]),
+            tx.synth("b", 4096, 8192, &[ChunkHash::hash_chunk(&data)]),
         ];
         assert_eq!(tx.dedup(files, DRY).candidates, 0);
     }

@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use redb::{Database, ReadableDatabase, TableDefinition};
 
-pub const HASH_LEN: usize = 16;
-pub type ChunkHash = [u8; HASH_LEN];
+use crate::hasher::ChunkHash;
 
 const FILES: TableDefinition<(u64, u64), &[u8]> = TableDefinition::new("files");
 
@@ -39,7 +38,7 @@ pub struct EntryRef<'a> {
 const HEADER: usize = 8 + 16 + 16 + 4;
 
 fn encoded_len(e: EntryRef) -> usize {
-    HEADER + e.hashes.len() * HASH_LEN
+    HEADER + e.hashes.len() * ChunkHash::HASH_LEN
 }
 
 fn encode_into(buf: &mut [u8], e: EntryRef) {
@@ -48,8 +47,8 @@ fn encode_into(buf: &mut [u8], e: EntryRef) {
     buf[8..24].copy_from_slice(&e.mtime_ns.to_le_bytes());
     buf[24..40].copy_from_slice(&e.ctime_ns.to_le_bytes());
     buf[40..44].copy_from_slice(&e.blksz.to_le_bytes());
-    for (dst, h) in buf[HEADER..].chunks_exact_mut(HASH_LEN).zip(e.hashes) {
-        dst.copy_from_slice(h);
+    for (dst, h) in buf[HEADER..].chunks_exact_mut(ChunkHash::HASH_LEN).zip(e.hashes) {
+        dst.copy_from_slice(h.as_ref());
     }
 }
 
@@ -62,7 +61,7 @@ fn encode(e: EntryRef) -> Vec<u8> {
 
 impl FileEntry {
     fn decode(buf: &[u8]) -> Result<Self> {
-        if buf.len() < HEADER || !(buf.len() - HEADER).is_multiple_of(HASH_LEN) {
+        if buf.len() < HEADER || !(buf.len() - HEADER).is_multiple_of(ChunkHash::HASH_LEN) {
             bail!("corrupt cache entry, len {}", buf.len());
         }
         // Slices are exact-length after the bounds check above; try_into
@@ -75,7 +74,7 @@ impl FileEntry {
             mtime_ns: i128::from_le_bytes(arr(&buf[8..24])),
             ctime_ns: i128::from_le_bytes(arr(&buf[24..40])),
             blksz: u32::from_le_bytes(arr(&buf[40..44])),
-            hashes: buf[HEADER..].chunks_exact(HASH_LEN).map(arr).collect(),
+            hashes: buf[HEADER..].chunks_exact(ChunkHash::HASH_LEN).map(arr).map(|i| ChunkHash::from_array(i)).collect(),
         })
     }
 
@@ -204,7 +203,7 @@ mod tests {
             mtime_ns: 1,
             ctime_ns: 2,
             blksz: 131072,
-            hashes: (0..n).map(|i| [i as u8; HASH_LEN]).collect(),
+            hashes: (0..n).map(|i| ChunkHash::from_array([i as u8; ChunkHash::HASH_LEN])).collect(),
         }
     }
 

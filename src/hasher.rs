@@ -12,13 +12,7 @@ use anyhow::{Context, Result, ensure};
 use rayon::prelude::*;
 use rustix::fs::{OFlags, fcntl_setfl};
 
-use crate::cache::{Cache, ChunkHash, EntryRef, HASH_LEN};
-
-// Sentinel for all-zero chunks. Collision with a real XXH3-128 output is
-// 2^-128 and only costs a wasted memcmp. Skipped in the index: ZFS already
-// collapses zero runs via compression, and sparse files would otherwise put
-// millions of locations in one bucket.
-pub const ZERO_HASH: ChunkHash = [0u8; HASH_LEN];
+use crate::cache::{Cache, EntryRef};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Stat {
@@ -109,6 +103,44 @@ fn try_o_direct(f: &File, blksz: u32) {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct ChunkHash {
+    hash: [u8; Self::HASH_LEN],
+}
+
+impl ChunkHash {
+    pub const HASH_LEN: usize = 16;
+
+    // Sentinel for all-zero chunks. Collision with a real XXH3-128 output is
+    // 2^-128 and only costs a wasted memcmp. Skipped in the index: ZFS already
+    // collapses zero runs via compression, and sparse files would otherwise put
+    // millions of locations in one bucket.
+    pub const ZERO_HASH: ChunkHash = Self { hash: [0u8; Self::HASH_LEN] };
+
+    pub fn hash_chunk(buf: &[u8]) -> Self {
+        Self { hash: xxhash_rust::xxh3::xxh3_128(buf).to_le_bytes() }
+    }
+
+    pub fn from_array(array: [u8; Self::HASH_LEN]) -> Self {
+        Self { hash: array }
+    }
+
+    pub fn try_from_slice(slice: &[u8]) -> Result<Self, ()> {
+        if slice.len() == ChunkHash::HASH_LEN {
+            Ok(Self::from_array(*slice.as_array::< {ChunkHash::HASH_LEN}>().unwrap()))
+        } else {
+            Err(())
+        }
+    }
+}
+
+impl AsRef<[u8]> for ChunkHash {
+    fn as_ref(&self) -> &[u8] {
+        self.hash.as_slice()
+    }
+}
+
 // Chunk boundaries follow st_blksize so the hashes line up with ranges
 // FICLONERANGE will accept. XXH3-128 is non-crypto; we always byte-verify
 // candidate pairs before cloning, so the hash only has to keep the false-
@@ -131,19 +163,15 @@ fn hash_fd(mut f: impl Read, blksz: u32) -> Result<Vec<ChunkHash>> {
         }
         let chunk = &buf[..n];
         hashes.push(if is_zero(chunk) {
-            ZERO_HASH
+            ChunkHash::ZERO_HASH
         } else {
-            hash_chunk(chunk)
+            ChunkHash::hash_chunk(chunk)
         });
         if n < buf.len() {
             break;
         }
     }
     Ok(hashes)
-}
-
-pub fn hash_chunk(buf: &[u8]) -> ChunkHash {
-    xxhash_rust::xxh3::xxh3_128(buf).to_le_bytes()
 }
 
 // Slice eq compiles to memcmp: SIMD, bails on first differing cache line
@@ -259,9 +287,9 @@ mod tests {
         std::fs::write(&p, b"aaaabbbbcc").unwrap();
         let hs = hash_file(&p, 4).unwrap();
         assert_eq!(hs.len(), 3);
-        assert_eq!(hs[0], hash_chunk(b"aaaa"));
-        assert_eq!(hs[1], hash_chunk(b"bbbb"));
-        assert_eq!(hs[2], hash_chunk(b"cc"));
+        assert_eq!(hs[0], ChunkHash::hash_chunk(b"aaaa"));
+        assert_eq!(hs[1], ChunkHash::hash_chunk(b"bbbb"));
+        assert_eq!(hs[2], ChunkHash::hash_chunk(b"cc"));
     }
 
     #[test]
@@ -273,9 +301,9 @@ mod tests {
         data.extend_from_slice(&[0u8; 4096]);
         std::fs::write(&p, &data).unwrap();
         let hs = hash_file(&p, 4096).unwrap();
-        assert_eq!(hs[0], ZERO_HASH);
-        assert_ne!(hs[1], ZERO_HASH);
-        assert_eq!(hs[2], ZERO_HASH);
+        assert_eq!(hs[0], ChunkHash::ZERO_HASH);
+        assert_ne!(hs[1], ChunkHash::ZERO_HASH);
+        assert_eq!(hs[2], ChunkHash::ZERO_HASH);
         // Sentinel is reachable for truly-zero input only.
         assert!(is_zero(&[0; 4096]));
         assert!(!is_zero(&[0, 0, 0, 1]));
